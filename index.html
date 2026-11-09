@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#111111">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Tram">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="apple-touch-icon.png">
+<title>Tram Grenoble</title>
+<style>
+  :root { --bg:#111; --fg:#f2f2f2; --mut:#8a8a8a; --line:#2a2a2a; --card:#1a1a1a; }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#fafafa; --fg:#111; --mut:#777; --line:#e4e4e4; --card:#fff; }
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--fg); font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; max-width:520px; margin:0 auto; padding:16px 16px 40px; }
+  header { display:flex; align-items:center; gap:10px; margin-bottom:16px; min-height:40px; }
+  h1 { font-size:20px; font-weight:600; flex:1; }
+  button { font:inherit; color:inherit; background:none; border:0; cursor:pointer; }
+  .back { font-size:22px; width:32px; height:32px; }
+  .star { font-size:22px; width:36px; height:36px; color:var(--mut); }
+  .star.on { color:#f5b301; }
+  .lines { display:flex; gap:10px; margin-bottom:18px; }
+  .chip { width:48px; height:48px; border-radius:50%; font-weight:700; font-size:20px; display:grid; place-items:center; }
+  .chip.sm { width:30px; height:30px; font-size:14px; flex:none; }
+  .sec { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--mut); margin:18px 0 6px; }
+  .row { display:flex; align-items:center; gap:12px; padding:13px 2px; border-bottom:1px solid var(--line); width:100%; text-align:left; }
+  .row .city { color:var(--mut); font-size:13px; }
+  input { width:100%; font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:11px 12px; margin-bottom:6px; }
+  .dir { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px; }
+  .dir h2 { font-size:14px; font-weight:500; color:var(--mut); margin-bottom:8px; }
+  .times { display:flex; gap:22px; align-items:baseline; flex-wrap:wrap; }
+  .t { font-size:30px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .t small { font-size:14px; font-weight:500; margin-left:2px; }
+  .t.next ~ .t { font-size:22px; color:var(--mut); }
+  .rt { display:inline-block; width:7px; height:7px; border-radius:50%; background:#2ecc71; vertical-align:super; margin-left:3px; }
+  .clock { color:var(--mut); font-size:12px; margin-top:4px; }
+  .msg { color:var(--mut); padding:20px 0; text-align:center; }
+  .foot { color:var(--mut); font-size:12px; text-align:center; margin-top:20px; }
+</style>
+</head>
+<body>
+<header>
+  <button class="back" id="back" hidden aria-label="Retour">←</button>
+  <h1 id="title">Tram</h1>
+  <button class="star" id="star" hidden aria-label="Favori">★</button>
+</header>
+<main id="app"></main>
+<p class="foot" id="foot"></p>
+
+<script>
+const API = 'https://data.mobilites-m.fr/api';
+const FALLBACK = [
+  {id:'SEM:A',shortName:'A',color:'3376B8',textColor:'FFFFFF'},
+  {id:'SEM:B',shortName:'B',color:'479A45',textColor:'FFFFFF'},
+  {id:'SEM:C',shortName:'C',color:'C20078',textColor:'FFFFFF'},
+  {id:'SEM:D',shortName:'D',color:'DE9917',textColor:'FFFFFF'},
+  {id:'SEM:E',shortName:'E',color:'533786',textColor:'FFFFFF'}
+];
+const $ = s => document.querySelector(s);
+const app = $('#app');
+let lines = FALLBACK, timer = null;
+
+const store = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+};
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const chip = (l, sm) => `<span class="chip${sm?' sm':''}" style="background:#${l.color};color:#${l.textColor||'fff'}">${esc(l.shortName)}</span>`;
+const lineOf = id => lines.find(l => l.id === id) || {id, shortName:id.split(':')[1], color:'666'};
+
+const pending = {};
+let reqId = 0;
+window.__nativeDone = (id, status, body) => {
+  const p = pending[id]; delete pending[id];
+  if (!p) return;
+  if (status >= 200 && status < 300) { try { p.ok(JSON.parse(body)); } catch (e) { p.ko(e); } }
+  else p.ko(new Error(status || 'réseau'));
+};
+async function get(path) {
+  if (window.Native) {
+    return new Promise((ok, ko) => { const id = ++reqId; pending[id] = {ok, ko}; window.Native.get(API + path, id); });
+  }
+  const r = await fetch(API + path);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+function header(title, back, starKey) {
+  $('#title').innerHTML = title;
+  $('#back').hidden = !back;
+  const st = $('#star');
+  st.hidden = !starKey;
+  if (starKey) {
+    const favs = store.get('favs', []);
+    st.classList.toggle('on', favs.some(f => f.key === starKey.key));
+    st.onclick = () => {
+      let f = store.get('favs', []);
+      if (f.some(x => x.key === starKey.key)) f = f.filter(x => x.key !== starKey.key);
+      else f.push(starKey);
+      store.set('favs', f);
+      st.classList.toggle('on');
+    };
+  }
+}
+
+function go(hash) { location.hash = hash; }
+$('#back').onclick = () => history.length > 1 ? history.back() : go('');
+
+/* ---------- Accueil ---------- */
+function home() {
+  header('Tram', false);
+  const favs = store.get('favs', []);
+  app.innerHTML = `
+    <div class="lines">${lines.map(l => `<button data-l="${l.id}">${chip(l)}</button>`).join('')}</div>
+    ${favs.length ? `<div class="sec">Favoris</div>` + favs.map(f => `
+      <button class="row" data-go="${f.line}|${f.stop}|${encodeURIComponent(f.name)}">
+        ${chip(lineOf(f.line), true)}<span>${esc(f.name)}</span>
+      </button>`).join('') : `<p class="msg">Choisis une ligne, puis un arrêt.<br>★ pour l'ajouter ici.</p>`}`;
+  app.querySelectorAll('[data-l]').forEach(b => b.onclick = () => go(b.dataset.l));
+  app.querySelectorAll('[data-go]').forEach(b => b.onclick = () => go(b.dataset.go));
+}
+
+/* ---------- Arrêts d'une ligne ---------- */
+async function stops(lineId) {
+  const l = lineOf(lineId);
+  header(`${chip(l, true)}&nbsp; Arrêts`, true);
+  app.innerHTML = `<p class="msg">Chargement…</p>`;
+  try {
+    const list = await get(`/routers/default/index/routes/${encodeURIComponent(lineId)}/clusters`);
+    const render = q => {
+      const n = q.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+      const items = list.filter(s => !n || (s.name + ' ' + s.city).normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().includes(n));
+      $('#list').innerHTML = items.map(s => `
+        <button class="row" data-go="${lineId}|${s.code || s.id}|${encodeURIComponent(s.name)}">
+          <span>${esc(s.name)}<br><span class="city">${esc(s.city)}</span></span>
+        </button>`).join('') || `<p class="msg">Aucun arrêt</p>`;
+      $('#list').querySelectorAll('[data-go]').forEach(b => b.onclick = () => go(b.dataset.go));
+    };
+    app.innerHTML = `<input id="q" placeholder="Rechercher un arrêt" autocomplete="off"><div id="list"></div>`;
+    $('#q').oninput = e => render(e.target.value);
+    render('');
+  } catch (e) {
+    app.innerHTML = `<p class="msg">Impossible de charger les arrêts (${esc(e.message)}).</p>`;
+  }
+}
+
+/* ---------- Horaires à un arrêt ---------- */
+async function times(lineId, stopCode, name) {
+  const l = lineOf(lineId);
+  header(`${chip(l, true)}&nbsp; ${esc(name)}`, true, {key: lineId + '|' + stopCode, line: lineId, stop: stopCode, name});
+  if (!app.querySelector('.dir')) app.innerHTML = `<p class="msg">Chargement…</p>`;
+  try {
+    const data = await get(`/routers/default/index/clusters/${encodeURIComponent(stopCode)}/stoptimes`);
+    const now = Date.now();
+    const dirs = data
+      .filter(p => p.pattern && p.pattern.id.startsWith(lineId + ':'))
+      .reduce((acc, p) => {
+        const k = p.pattern.desc;
+        (acc[k] ||= []).push(...p.times);
+        return acc;
+      }, {});
+    const html = Object.entries(dirs).map(([dest, ts]) => {
+      const next = ts
+        .map(t => ({ at: (t.serviceDay + (t.realtimeDeparture ?? t.scheduledDeparture)) * 1000, rt: t.realtime }))
+        .filter(t => t.at > now - 30000)
+        .sort((a, b) => a.at - b.at)
+        .slice(0, 3);
+      if (!next.length) return '';
+      const fmt = t => {
+        const m = Math.max(0, Math.round((t.at - now) / 60000));
+        return m === 0 ? 'Quai' : m >= 60
+          ? new Date(t.at).toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'})
+          : `${m}<small>min</small>`;
+      };
+      return `<div class="dir"><h2>→ ${esc(dest)}</h2>
+        <div class="times">${next.map((t, i) => `<span class="t${i ? '' : ' next'}">${fmt(t)}${t.rt ? '<span class="rt" title="temps réel"></span>' : ''}</span>`).join('')}</div>
+        <div class="clock">${next.map(t => new Date(t.at).toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'})).join(' · ')}</div>
+      </div>`;
+    }).join('');
+    app.innerHTML = html || `<p class="msg">Aucun passage prévu pour l'instant.</p>`;
+    $('#foot').textContent = 'Mis à jour à ' + new Date().toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'}) + ' · ● temps réel';
+  } catch (e) {
+    app.innerHTML = `<p class="msg">Impossible de charger les horaires (${esc(e.message)}).</p>`;
+  }
+}
+
+/* ---------- Routage ---------- */
+function route() {
+  clearInterval(timer);
+  $('#foot').textContent = '';
+  const h = decodeURIComponent(location.hash.slice(1));
+  if (!h) return home();
+  const [line, stop, name] = h.split('|');
+  if (!stop) return stops(line);
+  app.innerHTML = '';
+  const run = () => times(line, stop, decodeURIComponent(name || stop));
+  run();
+  timer = setInterval(run, 30000);
+}
+window.addEventListener('hashchange', route);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && location.hash.split('|').length > 1) route(); });
+
+(async () => {
+  route();
+  try {
+    const all = await get('/routers/default/index/routes?reseaux=SEM');
+    const trams = all.filter(r => r.type === 'TRAM' || r.mode === 'TRAM').sort((a, b) => a.shortName.localeCompare(b.shortName));
+    if (trams.length) { lines = trams; if (!location.hash) home(); }
+  } catch {}
+})();
+</script>
+</body>
+</html>
